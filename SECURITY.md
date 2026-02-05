@@ -85,7 +85,6 @@ The API implements several security measures to protect against common vulnerabi
 
 When `ENABLE_LOGIN=true`:
 - The `/dev-login` endpoint allows **anyone** to generate tokens with **arbitrary roles**
-- CORS is set to allow all origins (`Access-Control-Allow-Origin: *`)
 - JWT signature verification may be bypassed if using default `JWT_SECRET`
 
 **NEVER enable development mode in production!**

@@ -57,17 +57,6 @@ def flask_app_login_disabled():
     return app
 
 
-def test_dev_login_options_method(flask_app):
-    """Test OPTIONS method for CORS preflight."""
-    client = flask_app.test_client()
-    
-    response = client.options('/dev-login')
-    
-    assert response.status_code == 200
-    assert 'Access-Control-Allow-Origin' in response.headers
-    assert response.headers['Access-Control-Allow-Origin'] == '*'
-
-
 def test_dev_login_disabled_returns_404(flask_app_login_disabled):
     """Test that dev-login returns 404 when ENABLE_LOGIN is False."""
     client = flask_app_login_disabled.test_client()

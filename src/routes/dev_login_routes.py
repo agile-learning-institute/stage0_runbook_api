@@ -25,7 +25,7 @@ def create_dev_login_routes():
     dev_login_routes = Blueprint('dev_login_routes', __name__)
     config = Config.get_instance()
     
-    @dev_login_routes.route('', methods=['POST', 'OPTIONS'])
+    @dev_login_routes.route('', methods=['POST'])
     @handle_route_exceptions
     def dev_login():
         """
@@ -37,14 +37,6 @@ def create_dev_login_routes():
             "roles": ["developer", "admin"]
         }
         """
-        # Handle CORS preflight requests
-        if request.method == 'OPTIONS':
-            response = jsonify({})
-            response.headers.add('Access-Control-Allow-Origin', '*')
-            response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-            return response, 200
-        
         # Check if dev login is enabled
         config = Config.get_instance()
         if not config.ENABLE_LOGIN:
@@ -79,7 +71,6 @@ def create_dev_login_routes():
             logger.error(f"Error encoding JWT: {str(e)}")
             raise HTTPForbidden(f"Error generating token: {str(e)}")
         
-        # Return response with CORS headers
         response = {
             "access_token": token,
             "token_type": "bearer",
@@ -87,13 +78,8 @@ def create_dev_login_routes():
             "subject": subject,
             "roles": roles
         }
-        
         logger.info(f"Dev login successful for subject: {subject}")
-        response_obj = jsonify(response)
-        response_obj.headers.add('Access-Control-Allow-Origin', '*')
-        response_obj.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response_obj.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        return response_obj, 200
+        return jsonify(response), 200
     
     logger.info("Dev Login Flask Routes Registered")
     return dev_login_routes
