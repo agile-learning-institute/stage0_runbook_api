@@ -67,6 +67,8 @@ class Config:
             self.API_PROTOCOL = ''
             self.API_HOST = ''
             self.RUNBOOKS_DIR = ''
+            self.RUNBOOK_WORKSPACE = ''
+            self.RUNBOOK_WORKSPACE_HOST = ''
             self.MAX_RECURSION_DEPTH = 0
 
             # JWT Configuration
@@ -85,6 +87,8 @@ class Config:
                 "BUILT_AT": "LOCAL",
                 "LOGGING_LEVEL": "INFO",
                 "RUNBOOKS_DIR": "./samples/runbooks",
+                "RUNBOOK_WORKSPACE": "",  # optional: container path for script execution (enables host-path merge)
+                "RUNBOOK_WORKSPACE_HOST": "",  # optional: host path to same dir (for docker run -v from scripts)
                 "API_PROTOCOL": "http",  # http or https
                 "API_HOST": "localhost",  # hostname for API base URL
             }

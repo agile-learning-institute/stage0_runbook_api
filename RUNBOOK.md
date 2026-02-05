@@ -162,6 +162,15 @@ When a runbook script executes, the following system-managed environment variabl
   - All system-managed, cannot be overridden by user env_vars
   - Use directly: `-H "$RUNBOOK_H_AUTH" -H "$RUNBOOK_H_CORR" -H "$RUNBOOK_H_RECUR" -H "$RUNBOOK_H_CTYPE"`
 
+- **`RUNBOOK_EXEC_DIR_HOST`** - Always set. Path to the current execution directory. When the API is started with `RUNBOOK_WORKSPACE` and `RUNBOOK_WORKSPACE_HOST`, this is the **host** path (use it in **`docker run -v`**; the daemon resolves `-v` on the host). When no workspace is configured, it is the container path (do not use for `docker run -v`). Example with workspace: `docker run --rm -v "$RUNBOOK_EXEC_DIR_HOST/data:/repo" ...`
+
+### Scripts that run `docker run -v`
+
+Paths in `docker run -v <host_path>:<container_path>` are resolved by the Docker daemon on the **host**. When the runbook API runs inside a container, the script’s current directory is inside that container, so a `-v` using that path would not exist on the host. To run any Docker CLI that needs volume mounts:
+
+1. Start the API with a workspace: set `RUNBOOK_WORKSPACE` (container path) and `RUNBOOK_WORKSPACE_HOST` (matching host path) and mount that host path into the API container. Then **`RUNBOOK_EXEC_DIR_HOST`** is the host path to the execution directory.
+2. In your script, use **`RUNBOOK_EXEC_DIR_HOST`** in `-v` arguments (e.g. `-v "$RUNBOOK_EXEC_DIR_HOST:/repo"`). If your script invokes a Makefile or other tool that runs `docker run -v`, pass the path via an env var (e.g. `MERGE_REPO_HOST="$RUNBOOK_EXEC_DIR_HOST/repo"`) and have the Makefile use it when set. Without a workspace, `RUNBOOK_EXEC_DIR_HOST` is the container path and must not be used for `-v`.
+
 ### Calling a Sub-Runbook
 
 To call a sub-runbook from your script, make an HTTP POST request to the API:

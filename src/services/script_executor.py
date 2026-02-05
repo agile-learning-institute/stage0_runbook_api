@@ -208,10 +208,9 @@ class ScriptExecutor:
             temp_exec_dir = None
             start_time = time.time()
             try:
-                # Create a dedicated temp directory for this execution
-                # Thread-safe: tempfile.mkdtemp() uses OS-level atomic operations
-                # UUID ensures unique directory names even with concurrent executions
-                temp_exec_dir = Path(tempfile.mkdtemp(prefix=f'runbook-exec-{uuid.uuid4().hex[:8]}-'))
+                # Optional: create temp dir under a host-mounted workspace so scripts can pass host paths to docker run -v
+                parent_dir = Path(config.RUNBOOK_WORKSPACE).resolve() if getattr(config, 'RUNBOOK_WORKSPACE', None) and Path(config.RUNBOOK_WORKSPACE).is_dir() else None
+                temp_exec_dir = Path(tempfile.mkdtemp(prefix=f'runbook-exec-{uuid.uuid4().hex[:8]}-', dir=str(parent_dir) if parent_dir else None))
                 temp_script = temp_exec_dir / 'temp.zsh'
                 
                 # Validate that the temp directory is actually a directory (security check)
@@ -226,6 +225,15 @@ class ScriptExecutor:
                         error_msg = "Failed to copy input files:\n" + "\n".join(copy_errors)
                         logger.error(error_msg)
                         return 1, "", error_msg
+                
+                # Per-execution env (avoids cross-request leakage when concurrent). Always set RUNBOOK_EXEC_DIR_HOST:
+                # when workspace is configured it is the host path (for docker run -v); otherwise the container path.
+                exec_env = dict(os.environ)
+                workspace_host = getattr(config, 'RUNBOOK_WORKSPACE_HOST', None) or ''
+                exec_env['RUNBOOK_EXEC_DIR_HOST'] = (
+                    f"{workspace_host.rstrip('/')}/{temp_exec_dir.name}"
+                    if (parent_dir and workspace_host) else str(temp_exec_dir)
+                )
                 
                 # Create and write the script file
                 with open(temp_script, 'w', encoding='utf-8') as f:
@@ -245,7 +253,8 @@ class ScriptExecutor:
                         capture_output=True,
                         text=True,
                         cwd=str(temp_exec_dir),  # Execute in isolated temp directory (prevents access to /, ../, etc.)
-                        timeout=timeout_seconds
+                        timeout=timeout_seconds,
+                        env=exec_env,
                     )
                     
                     execution_time = time.time() - start_time
