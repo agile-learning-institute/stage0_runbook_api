@@ -76,6 +76,9 @@ docs/_build/
 .pybuilder/
 target/
 
+# Runbook API: per-run execution dir (make dev / make deploy)
+execution/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
