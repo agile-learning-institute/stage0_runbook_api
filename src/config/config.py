@@ -65,7 +65,7 @@ class Config:
             self.API_PORT = 0
             self.API_PROTOCOL = ''
             self.API_HOST = ''
-            self.RUNBOOKS_DIR = ''
+            self.RUNBOOKS_DIR = ''    # container path where runbooks exist (default /runbooks)
             self.EXECUTION_DIR = ''   # container path where per-run dirs are created (default /execution)
             self.MOUNT_DIR = ''       # host path mounted at EXECUTION_DIR (for docker run -v from scripts)
             self.MAX_RECURSION_DEPTH = 0
@@ -85,12 +85,12 @@ class Config:
             self.config_strings = {
                 "BUILT_AT": "LOCAL",
                 "LOGGING_LEVEL": "INFO",
-                "RUNBOOKS_DIR": "./samples/runbooks",
-                "EXECUTION_DIR": "/execution",  # container path for per-run dirs; image has read-only dir until overridden by mount
-                "MOUNT_DIR": "",  # host path mounted at EXECUTION_DIR (set in container so RUNBOOK_EXEC_DIR_HOST is correct)
-                "API_PROTOCOL": "http",  # http or https
-                "API_HOST": "localhost",  # hostname for API base URL
-                "UI_HEADER": "Stage0 Runbook Automation",  # title shown in SPA app bar
+                "RUNBOOKS_DIR": "/runbooks",
+                "EXECUTION_DIR": "/execution",
+                "MOUNT_DIR": "",  
+                "API_PROTOCOL": "http", 
+                "API_HOST": "localhost",
+                "UI_HEADER": "Stage0 Runbook Automation",
                 "JWT_ALGORITHM": "HS256",
                 "JWT_ISSUER": "dev-idp",
                 "JWT_AUDIENCE": "dev-api",
@@ -100,7 +100,7 @@ class Config:
                 "JWT_TTL_MINUTES": "480",
                 "SCRIPT_TIMEOUT_SECONDS": "600",  # 10 minutes default
                 "MAX_OUTPUT_SIZE_BYTES": "10485760",  # 10MB default (10 * 1024 * 1024)
-                "MAX_RECURSION_DEPTH": "50",  # Maximum recursion depth for nested runbook execution
+                "MAX_RECURSION_DEPTH": "50",  
             }
 
             self.config_booleans = {
@@ -113,6 +113,7 @@ class Config:
             
             # Initialize configuration
             self.initialize()
+            self.validate_config()
             self.configure_logging()
 
     def initialize(self):
@@ -154,12 +155,9 @@ class Config:
             value = self._get_config_value(key, default, True)
             setattr(self, key, value)
 
-        # Config validation (required values, paths, etc.)
-        self._validate_config()
-
         return
 
-    def _validate_config(self):
+    def validate_config(self):
         """Validate required config: JWT_SECRET must be set; MOUNT_DIR and EXECUTION_DIR must be valid."""
         default_jwt_secret = self.config_string_secrets.get("JWT_SECRET", "dev-secret-change-me")
         if self.JWT_SECRET == default_jwt_secret:

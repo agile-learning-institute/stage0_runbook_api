@@ -68,7 +68,7 @@ class TestConfigDefaults:
         assert config.BUILT_AT == "LOCAL"
         # LOGGING_LEVEL is converted to int by configure_logging(), check default instead
         assert config.get_default('LOGGING_LEVEL') == "INFO"
-        assert config.RUNBOOKS_DIR == "./samples/runbooks"
+        assert config.RUNBOOKS_DIR == "/runbooks"
     
     def test_int_defaults(self):
         """Test default integer values."""
@@ -179,7 +179,7 @@ class TestConfigItems:
         runbooks_item = next((item for item in config.config_items if item['name'] == 'RUNBOOKS_DIR'), None)
         assert runbooks_item is not None
         assert runbooks_item['from'] == 'default'
-        assert runbooks_item['value'] == './samples/runbooks'
+        assert runbooks_item['value'] == '/runbooks'
     
     def test_config_items_tracks_env_vars(self):
         """Test that config_items tracks environment variable values."""
@@ -219,7 +219,7 @@ class TestConfigMethods:
     def test_get_default_string(self):
         """Test get_default for string config."""
         config = Config.get_instance()
-        assert config.get_default('RUNBOOKS_DIR') == './samples/runbooks'
+        assert config.get_default('RUNBOOKS_DIR') == '/runbooks'
         assert config.get_default('BUILT_AT') == 'LOCAL'
     
     def test_get_default_int(self):
