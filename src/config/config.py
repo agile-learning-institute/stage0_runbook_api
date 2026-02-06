@@ -7,7 +7,6 @@ with support for configuration sources (environment variables, defaults).
 This is a simplified version without MongoDB dependencies.
 """
 import os
-import sys
 import json
 from pathlib import Path
 
@@ -67,8 +66,8 @@ class Config:
             self.API_PROTOCOL = ''
             self.API_HOST = ''
             self.RUNBOOKS_DIR = ''
-            self.RUNBOOK_WORKSPACE = ''
-            self.RUNBOOK_WORKSPACE_HOST = ''
+            self.EXECUTION_DIR = ''   # container path where per-run dirs are created (default /execution)
+            self.MOUNT_DIR = ''       # host path mounted at EXECUTION_DIR (for docker run -v from scripts)
             self.MAX_RECURSION_DEPTH = 0
 
             # JWT Configuration
@@ -87,11 +86,14 @@ class Config:
                 "BUILT_AT": "LOCAL",
                 "LOGGING_LEVEL": "INFO",
                 "RUNBOOKS_DIR": "./samples/runbooks",
-                "RUNBOOK_WORKSPACE": "",  # optional: container path for script execution (enables host-path merge)
-                "RUNBOOK_WORKSPACE_HOST": "",  # optional: host path to same dir (for docker run -v from scripts)
+                "EXECUTION_DIR": "/execution",  # container path for per-run dirs; image has read-only dir until overridden by mount
+                "MOUNT_DIR": "",  # host path mounted at EXECUTION_DIR (set in container so RUNBOOK_EXEC_DIR_HOST is correct)
                 "API_PROTOCOL": "http",  # http or https
                 "API_HOST": "localhost",  # hostname for API base URL
                 "UI_HEADER": "Stage0 Runbook Automation",  # title shown in SPA app bar
+                "JWT_ALGORITHM": "HS256",
+                "JWT_ISSUER": "dev-idp",
+                "JWT_AUDIENCE": "dev-api",
             }
             self.config_ints = {
                 "API_PORT": "8083",
@@ -150,27 +152,45 @@ class Config:
         # Initialize String Secrets
         for key, default in self.config_string_secrets.items():
             value = self._get_config_value(key, default, True)
-            
-            # Special handling for JWT_SECRET: fail fast if default is used
-            if key == "JWT_SECRET" and value == default:
-                error_msg = (
-                    "JWT_SECRET must be explicitly set. Using the default value is not allowed for security reasons. "
-                    "Please set JWT_SECRET environment variable to a secure random value."
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-            
             setattr(self, key, value)
 
-        # Set JWT defaults that aren't secrets
-        if not hasattr(self, 'JWT_ALGORITHM') or not self.JWT_ALGORITHM:
-            self.JWT_ALGORITHM = "HS256"
-        if not hasattr(self, 'JWT_ISSUER') or not self.JWT_ISSUER:
-            self.JWT_ISSUER = "dev-idp"
-        if not hasattr(self, 'JWT_AUDIENCE') or not self.JWT_AUDIENCE:
-            self.JWT_AUDIENCE = "dev-api"
-            
+        # Config validation (required values, paths, etc.)
+        self._validate_config()
+
         return
+
+    def _validate_config(self):
+        """Validate required config: JWT_SECRET must be set; MOUNT_DIR and EXECUTION_DIR must be valid."""
+        default_jwt_secret = self.config_string_secrets.get("JWT_SECRET", "dev-secret-change-me")
+        if self.JWT_SECRET == default_jwt_secret:
+            error_msg = (
+                "JWT_SECRET must be explicitly set. Using the default value is not allowed for security reasons. "
+                "Please set JWT_SECRET environment variable to a secure random value."
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # EXECUTION_DIR (container path) and MOUNT_DIR (host path). Image has read-only EXECUTION_DIR until mount.
+        default_mount_dir = self.config_strings.get("MOUNT_DIR", "")
+        if self.MOUNT_DIR == default_mount_dir:
+            raise ValueError(
+                "MOUNT_DIR is not set. Set MOUNT_DIR to the host path mounted at EXECUTION_DIR "
+                f"(e.g. export MOUNT_DIR=$(pwd)/execution and -v \"$MOUNT_DIR:{self.EXECUTION_DIR}\")."
+            )
+        exec_path = Path(self.EXECUTION_DIR).resolve()
+        if not exec_path.exists():
+            raise ValueError(
+                f"{self.EXECUTION_DIR} does not exist. Mount the host path at EXECUTION_DIR "
+                f"(e.g. -v \"$MOUNT_DIR:{self.EXECUTION_DIR}\")."
+            )
+        if not exec_path.is_dir():
+            raise ValueError(f"{self.EXECUTION_DIR} is not a directory.")
+        if not os.access(exec_path, os.W_OK):
+            raise ValueError(
+                f"{self.EXECUTION_DIR} is not writable. Mount a volume over it "
+                f"(e.g. -v \"$MOUNT_DIR:{self.EXECUTION_DIR}\")."
+            )
+        logger.info("Execution directory: MOUNT_DIR=%s mounted at EXECUTION_DIR=%s", self.MOUNT_DIR, self.EXECUTION_DIR)
 
     def configure_logging(self):
         """
@@ -183,34 +203,18 @@ class Config:
         The logging format includes timestamp, level, logger name, and message.
         Werkzeug request logs are suppressed to WARNING level to reduce noise.
         """
-        # Convert LOGGING_LEVEL string to logging constant
-        if isinstance(self.LOGGING_LEVEL, str):
-            logging_level = getattr(logging, self.LOGGING_LEVEL, logging.INFO)
-            self.LOGGING_LEVEL = logging_level  # Store as integer
-        elif isinstance(self.LOGGING_LEVEL, int):
-            logging_level = self.LOGGING_LEVEL
-        else:
-            logging_level = logging.INFO
-            self.LOGGING_LEVEL = logging_level
+        # Convert LOGGING_LEVEL string (from config) to logging constant
+        logging_level = getattr(logging, (self.LOGGING_LEVEL).upper(), logging.INFO)
+        self.LOGGING_LEVEL = logging_level
         
         # Configure logging with force=True to reconfigure even if handlers exist
-        # (e.g., if Flask/Werkzeug has already configured handlers)
-        if sys.version_info >= (3, 8):
-            logging.basicConfig(
-                level=logging_level,
-                format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-                force=True
-            )
-        else:
-            # For Python < 3.8, reset handlers manually first
-            for handler in logging.root.handlers[:]:
-                logging.root.removeHandler(handler)
-            logging.basicConfig(
-                level=logging_level,
-                format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
-            )
+        # (e.g., if Flask/Werkzeug has already configured handlers). Project requires Python 3.12+.
+        logging.basicConfig(
+            level=logging_level,
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            force=True
+        )
 
         # Ensure root logger level is set (child loggers inherit this)
         logging.root.setLevel(logging_level)
@@ -334,13 +338,6 @@ class Config:
         # Check config_string_secrets
         if name in self.config_string_secrets:
             return self.config_string_secrets[name]
-        # Check hard-coded defaults
-        if name == "JWT_ALGORITHM":
-            return "HS256"
-        if name == "JWT_ISSUER":
-            return "dev-idp"
-        if name == "JWT_AUDIENCE":
-            return "dev-api"
         return None
 
     @staticmethod

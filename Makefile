@@ -26,7 +26,7 @@ help:
 	@echo "  make execute RUNBOOK=samples/runbooks/SimpleRunbook.md DATA='{\"env_vars\":{\"TEST_VAR\":\"test_value\"}}'"
 
 down:
-	@docker-compose --profile runbook-dev --profile runbook-deploy down
+	@MOUNT_DIR=$$(pwd)/execution docker compose --profile runbook-dev --profile runbook-deploy down
 
 open:
 	@echo "Opening web UI..."
@@ -62,8 +62,9 @@ execute:
 # Start API server with local runbooks mounted (for runbook authors)
 dev:
 	@$(MAKE) down || true
+	@mkdir -p execution
 	@echo "Starting API server in dev mode with local runbooks mounted..."
-	@bash -c 'export JWT_SECRET=$$(date +%s) && docker-compose --profile runbook-dev up -d'
+	@bash -c 'export JWT_SECRET=$$(date +%s) && export MOUNT_DIR=$$(pwd)/execution && docker compose --profile runbook-dev up -d'
 	@echo "Waiting for API to be ready..."
 	@timeout 30 bash -c 'until curl -sf http://localhost:8083/metrics > /dev/null; do sleep 1; done' || true
 	@echo "API is ready at http://localhost:8083"
@@ -73,8 +74,9 @@ dev:
 # Start API server with packaged runbooks (for deployment)
 deploy:
 	@$(MAKE) down || true
+	@mkdir -p execution
 	@echo "Starting API server in deploy mode with packaged runbooks..."
-	@bash -c 'export JWT_SECRET=$$(date +%s) && docker-compose --profile runbook-deploy up -d'
+	@bash -c 'export JWT_SECRET=$$(date +%s) && export MOUNT_DIR=$$(pwd)/execution && docker compose --profile runbook-deploy up -d'
 	@echo "Waiting for API to be ready..."
 	@timeout 30 bash -c 'until curl -sf http://localhost:8083/metrics > /dev/null; do sleep 1; done' || true
 	@echo "API is ready at http://localhost:8083"

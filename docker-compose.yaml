@@ -13,8 +13,11 @@ services:
       ENABLE_LOGIN: "true"
       LOGGING_LEVEL: "INFO"
       JWT_SECRET: ${JWT_SECRET:-}
+      MOUNT_DIR: ${MOUNT_DIR}
+      EXECUTION_DIR: ${EXECUTION_DIR:-/execution}
     volumes:
       - ./samples/runbooks:/workspace/runbooks
+      - ${MOUNT_DIR}:/execution
     working_dir: /workspace/runbooks
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8083/metrics')"]
@@ -37,6 +40,10 @@ services:
       ENABLE_LOGIN: "true"
       LOGGING_LEVEL: "INFO"
       JWT_SECRET: ${JWT_SECRET:-}
+      MOUNT_DIR: ${MOUNT_DIR}
+      EXECUTION_DIR: ${EXECUTION_DIR:-/execution}
+    volumes:
+      - ${MOUNT_DIR}:/execution
     working_dir: /opt/stage0/runner
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8083/metrics')"]
