@@ -59,8 +59,6 @@ RUN mkdir -p /execution && chmod 555 /execution
 ENV PYTHONPATH=/opt/stage0/runner
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV API_PORT=8083
-ENV RUNBOOKS_DIR=./runbooks
 
 # Expose the port the app will run on
 EXPOSE 8083
