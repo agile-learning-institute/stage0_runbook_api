@@ -36,7 +36,7 @@ make down
 make container
 ```
 
-The Makefile uses `curl` to interact with the API:
+The Makefile execute and validate commands use `curl` to interact with the API:
 - Automatically gets a dev token from `/dev-login`
 - Calls the appropriate API endpoint
 - Formats JSON output using `jq`
