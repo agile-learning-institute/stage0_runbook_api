@@ -91,6 +91,7 @@ class Config:
                 "RUNBOOK_WORKSPACE_HOST": "",  # optional: host path to same dir (for docker run -v from scripts)
                 "API_PROTOCOL": "http",  # http or https
                 "API_HOST": "localhost",  # hostname for API base URL
+                "UI_HEADER": "Stage0 Runbook Automation",  # title shown in SPA app bar
             }
             self.config_ints = {
                 "API_PORT": "8083",
