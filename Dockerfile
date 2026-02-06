@@ -52,6 +52,9 @@ COPY docs/ ./docs/
 # Copy runbooks to working directory for packaged deployment
 COPY samples/runbooks/ ./runbooks/
 
+# Create /execution non-writable so startup fails unless user mounts a volume over it
+RUN mkdir -p /execution && chmod 555 /execution
+
 # Set Environment Variables
 ENV PYTHONPATH=/opt/stage0/runner
 ENV PYTHONDONTWRITEBYTECODE=1

@@ -137,9 +137,11 @@ The API server uses a centralized `Config` singleton (see [`src/config/config.py
 
 **Key Configuration Variables:**
 - `API_PORT` - Port for the API server (default: `8083`)
-- `RUNBOOKS_DIR` - Directory containing runbooks (default: `./samples/runbooks`)
+- `RUNBOOKS_DIR` - Directory containing runbooks (default: `/runbooks`)
+- `EXECUTION_DIR` - Container path where per-run directories are created (default: `/execution`). 
+- `MOUNT_DIR` - **Required** host path mounted at `EXECUTION_DIR` used for `docker run -v`
 - `ENABLE_LOGIN` - Enable `/dev-login` endpoint for development (default: `false`, **NEVER enable in production**)
-- `JWT_SECRET` - Secret for JWT signing (**MUST be changed in production**)
+- `JWT_SECRET` - Secret for JWT signing (**MUST be set in production**)
 - `JWT_ISSUER` - Expected JWT issuer claim
 - `JWT_AUDIENCE` - Expected JWT audience claim
 

@@ -20,7 +20,7 @@ requests = "*"
 [scripts]
 test = "bash -c 'export JWT_SECRET=$(date +%s) && pytest test/unit test/integration -v'"
 e2e = "bash -c 'export JWT_SECRET=$(date +%s) && pytest test/e2e -v'"
-dev = "bash -c 'export ENABLE_LOGIN=true RUNBOOKS_DIR=./samples/runbooks JWT_SECRET=$(date +%s) PYTHONPATH=. && python src/server.py'"
+dev = "bash -c 'export ENABLE_LOGIN=true RUNBOOKS_DIR=./samples/runbooks JWT_SECRET=$(date +%s) MOUNT_DIR=/tmp EXECUTION_DIR=/tmp PYTHONPATH=. && python src/server.py'"
 coverage = "bash -c 'export JWT_SECRET=$(date +%s) && mkdir -p coverage && pytest test/unit test/integration --cov=src --cov-report=json:coverage/coverage.json --cov-report=term && python src/update_coverage_report.py'"
 
 [requires]

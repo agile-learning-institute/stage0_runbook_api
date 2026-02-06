@@ -6,7 +6,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import pytest
 
 # Add project root to path
@@ -58,6 +58,7 @@ class TestConfigDefaults:
         for key in ['API_PORT', 'RUNBOOKS_DIR', 'ENABLE_LOGIN']:
             if key in os.environ:
                 del os.environ[key]
+        # Do not clear EXECUTION_DIR/MOUNT_DIR; conftest sets them so Config validation passes
         # Always set JWT_SECRET to a non-default value to avoid fail-fast
         os.environ['JWT_SECRET'] = 'test-secret-for-unit-tests'
     
@@ -321,4 +322,71 @@ class TestConfigLogging:
         config = Config.get_instance()
         # Should default to INFO if invalid
         assert config.LOGGING_LEVEL == logging.INFO or hasattr(logging, config.LOGGING_LEVEL)
+
+
+def _mock_exec_path(exists=True, is_dir=True):
+    """Return a mock Path for EXECUTION_DIR with .resolve() returning self."""
+    mock = MagicMock()
+    mock.exists.return_value = exists
+    mock.is_dir.return_value = is_dir
+    mock.resolve.return_value = mock
+    return mock
+
+
+class TestConfigExecutionDir:
+    """Test EXECUTION_DIR (container path) and MOUNT_DIR (host path) validation."""
+
+    def setup_method(self):
+        """Reset config and env before each test."""
+        Config._instance = None
+        os.environ['JWT_SECRET'] = 'test-secret-for-unit-tests'
+        for key in ('EXECUTION_DIR', 'MOUNT_DIR'):
+            if key in os.environ:
+                del os.environ[key]
+
+    def teardown_method(self):
+        """Clean up."""
+        for key in ('EXECUTION_DIR', 'MOUNT_DIR'):
+            if key in os.environ:
+                del os.environ[key]
+
+    def test_execution_dir_when_mount_dir_default_raises(self):
+        """When MOUNT_DIR is default (not set), raise."""
+        with pytest.raises(ValueError, match="MOUNT_DIR is not set"):
+            Config.get_instance()
+
+    def test_execution_dir_when_path_missing_raises(self):
+        """When EXECUTION_DIR path does not exist, raise."""
+        os.environ['MOUNT_DIR'] = '/host/execution'
+        mock_exec = _mock_exec_path(exists=False)
+        with patch('src.config.config.Path', return_value=mock_exec):
+            with pytest.raises(ValueError, match="does not exist"):
+                Config.get_instance()
+
+    def test_execution_dir_when_path_not_dir_raises(self):
+        """When EXECUTION_DIR path exists but is not a directory, raise."""
+        os.environ['MOUNT_DIR'] = '/host/execution'
+        mock_exec = _mock_exec_path(exists=True, is_dir=False)
+        with patch('src.config.config.Path', return_value=mock_exec):
+            with pytest.raises(ValueError, match="is not a directory"):
+                Config.get_instance()
+
+    def test_execution_dir_when_path_not_writable_raises(self):
+        """When EXECUTION_DIR path exists but is not writable, raise."""
+        os.environ['MOUNT_DIR'] = '/host/execution'
+        mock_exec = _mock_exec_path(exists=True, is_dir=True)
+        with patch('src.config.config.Path', return_value=mock_exec):
+            with patch('src.config.config.os.access', return_value=False):
+                with pytest.raises(ValueError, match="is not writable"):
+                    Config.get_instance()
+
+    def test_execution_dir_when_all_valid_succeeds(self):
+        """When MOUNT_DIR is set and EXECUTION_DIR path exists, is dir, and is writable, validation passes."""
+        os.environ['MOUNT_DIR'] = '/host/execution'
+        mock_exec = _mock_exec_path(exists=True, is_dir=True)
+        with patch('src.config.config.Path', return_value=mock_exec):
+            with patch('src.config.config.os.access', return_value=True):
+                config = Config.get_instance()
+        assert config.EXECUTION_DIR == '/execution'  # default
+        assert config.MOUNT_DIR == '/host/execution'
 

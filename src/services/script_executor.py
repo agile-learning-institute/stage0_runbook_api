@@ -87,7 +87,8 @@ class ScriptExecutor:
             'RUNBOOK_H_CORR',
             'RUNBOOK_H_RECUR',
             'RUNBOOK_H_CTYPE',
-            'RUNBOOK_HEADERS'
+            'RUNBOOK_HEADERS',
+            'RUNBOOK_EXEC_DIR_HOST',
         }
         
         # Validate and sanitize environment variables
@@ -205,11 +206,11 @@ class ScriptExecutor:
         
         try:
             # Create isolated temporary directory for this execution (prevents path traversal)
+            # Per-run dirs are created under config.EXECUTION_DIR; fallback to system temp if not present (e.g. local dev)
             temp_exec_dir = None
             start_time = time.time()
             try:
-                # Optional: create temp dir under a host-mounted workspace so scripts can pass host paths to docker run -v
-                parent_dir = Path(config.RUNBOOK_WORKSPACE).resolve() if getattr(config, 'RUNBOOK_WORKSPACE', None) and Path(config.RUNBOOK_WORKSPACE).is_dir() else None
+                parent_dir = Path(config.EXECUTION_DIR) if Path(config.EXECUTION_DIR).is_dir() else None
                 temp_exec_dir = Path(tempfile.mkdtemp(prefix=f'runbook-exec-{uuid.uuid4().hex[:8]}-', dir=str(parent_dir) if parent_dir else None))
                 temp_script = temp_exec_dir / 'temp.zsh'
                 
@@ -226,13 +227,11 @@ class ScriptExecutor:
                         logger.error(error_msg)
                         return 1, "", error_msg
                 
-                # Per-execution env (avoids cross-request leakage when concurrent). Always set RUNBOOK_EXEC_DIR_HOST:
-                # when workspace is configured it is the host path (for docker run -v); otherwise the container path.
+                # Per-execution env: host path to this run's dir (for docker run -v). From config.MOUNT_DIR when set.
                 exec_env = dict(os.environ)
-                workspace_host = getattr(config, 'RUNBOOK_WORKSPACE_HOST', None) or ''
                 exec_env['RUNBOOK_EXEC_DIR_HOST'] = (
-                    f"{workspace_host.rstrip('/')}/{temp_exec_dir.name}"
-                    if (parent_dir and workspace_host) else str(temp_exec_dir)
+                    f"{config.MOUNT_DIR.rstrip('/')}/{temp_exec_dir.name}"
+                    if (parent_dir and config.MOUNT_DIR) else str(temp_exec_dir)
                 )
                 
                 # Create and write the script file
