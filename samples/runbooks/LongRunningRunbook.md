@@ -25,7 +25,9 @@ echo "Streaming updates every 2 seconds..."
 echo ""
 
 for i in $(seq 1 $CYCLES); do
-  echo "[$i/${CYCLES}] $(date -u +%H:%M:%S) - Still running..."
+  echo "****************************************************************"
+  echo "***** [$i/${CYCLES}] $(date -u +%H:%M:%S) - Still running..."
+  echo "****************************************************************"
   sleep 2
 done
 
