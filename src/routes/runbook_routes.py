@@ -8,7 +8,9 @@ Provides endpoints for Runbook domain:
 - POST /api/runbooks/<filename>/execute - Execute a runbook
 - PATCH /api/runbooks/<filename>/validate - Validate a runbook
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request, stream_with_context
+
+from ..flask_utils.exceptions import HTTPForbidden, HTTPNotFound, HTTPInternalServerError
 from ..flask_utils.token import create_flask_token
 from ..flask_utils.breadcrumb import create_flask_breadcrumb
 from ..flask_utils.route_wrapper import handle_route_exceptions
@@ -131,9 +133,9 @@ def create_runbook_routes(runbooks_dir: str):
         """
         POST /api/runbooks/<filename>/execute - Execute a runbook.
         
-        Args:
-            filename: The runbook filename
-            
+        Streams stdout/stderr as Server-Sent Events. Final event is "done" with
+        full execution result (success, return_code, stdout, stderr, errors, warnings).
+        
         Request body (optional):
             {
                 "env_vars": {
@@ -142,23 +144,41 @@ def create_runbook_routes(runbooks_dir: str):
             }
             
         Returns:
-            JSON response with execution result
+            text/event-stream with events: stdout, stderr, done
         """
         token = create_flask_token()
         breadcrumb = create_flask_breadcrumb(token)
         env_vars = _extract_env_vars_from_request()
         
-        # Extract raw JWT token string from Authorization header for passing to scripts
         auth_header = request.headers.get('Authorization', '')
-        token_string = None
-        if auth_header.startswith('Bearer '):
-            token_string = auth_header[7:].strip()
+        token_string = auth_header[7:].strip() if auth_header.startswith('Bearer ') else None
         
-        result = runbook_service.execute_runbook(filename, token, breadcrumb, env_vars, token_string=token_string)
-        logger.info(f"execute_runbook Success {str(breadcrumb['at_time'])}, {breadcrumb['correlation_id']}")
+        stream = runbook_service.execute_runbook_streaming(
+            filename, token, breadcrumb, env_vars, token_string=token_string
+        )
+        try:
+            first_chunk = next(stream)
+        except HTTPNotFound as e:
+            return jsonify({"success": False, "error": str(e)}), 404
+        except HTTPForbidden as e:
+            return jsonify({"success": False, "error": str(e)}), 403
+        except HTTPInternalServerError as e:
+            return jsonify({"success": False, "error": str(e)}), 500
         
-        status_code = 200 if result['success'] else 500
-        return jsonify(result), status_code
+        def generate():
+            yield first_chunk
+            for chunk in stream:
+                yield chunk
+        
+        logger.info(f"execute_runbook streaming {str(breadcrumb['at_time'])}, {breadcrumb['correlation_id']}")
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+            },
+        )
     
     logger.info("Runbook Flask Routes Registered")
     return runbook_routes

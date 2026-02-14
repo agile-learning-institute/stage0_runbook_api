@@ -6,10 +6,12 @@ A runbook is a markdown file, with some specific layout requirements. The docume
 The first H1 should be the runbook name. This should match the file name, without the .md extension. Runbook file names should not contain spaces. By convention, runbooks use Pascal case names. The content immediately following this header (before the next H1 section) is where you will find a description of what the runbook does, when to use it, and how to use it.
 
 # Environment Requirements
-This section must contain a yaml code block that defines the environment variables that the script expects to find, with a description of what that variable should contain. 
+This section must contain a YAML code block that defines the environment variables that the script expects to find, with a description of what that variable should contain. The format is `VAR_NAME: description` where the description is parsed as YAML. **Avoid special characters in descriptions** (such as `:`) unless the value is quoted, since YAML may interpret them. Use quotes when the description contains colons or other YAML-special characters.
 ```yaml
 REPO: The name of the repo in the form org/repo
 GITHUB_TOKEN: A github classic token with xyz permissions
+# If description has a colon, use quotes:
+MY_VAR: "Value must be in format: key-value"
 ```
 
 # File System Requirements
@@ -173,20 +175,21 @@ Paths in `docker run -v <host_path>:<container_path>` are resolved by the Docker
 
 ### Calling a Sub-Runbook
 
-To call a sub-runbook from your script, make an HTTP POST request to the API:
+To call a sub-runbook from your script, make an HTTP POST request to the API. The execute endpoint returns a Server-Sent Events (SSE) stream; the last event is `done` with the full JSON result:
 
 ```sh
 #! /bin/zsh
 echo "Parent runbook starting"
 
 # Call child runbook via API using pre-formatted header variables
-# This makes it easy to do right and hard to do wrong
-# All headers on one line for easy copy/paste
+# Response is SSE stream; last "data:" line is the done event with full result
 RESPONSE=$(curl -s -X POST "$RUNBOOK_URL/ChildRunbook.md/execute" \
   -H "$RUNBOOK_H_AUTH" -H "$RUNBOOK_H_CORR" -H "$RUNBOOK_H_RECUR" -H "$RUNBOOK_H_CTYPE" \
   -d '{"env_vars":{"CHILD_VAR":"value"}}')
 
-echo "Child runbook response: $RESPONSE"
+# Extract the last data line (done event) for the full JSON result
+RESULT=$(echo "$RESPONSE" | grep '^data:' | tail -1 | sed 's/^data: //')
+echo "Child runbook response: $RESULT"
 echo "Parent runbook completed"
 ```
 
