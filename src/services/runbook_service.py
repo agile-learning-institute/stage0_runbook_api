@@ -10,7 +10,7 @@ Orchestrates runbook operations using specialized components:
 """
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Generator
 from datetime import datetime, timezone
 
 from ..flask_utils.exceptions import HTTPNotFound, HTTPForbidden, HTTPInternalServerError
@@ -38,7 +38,7 @@ class RunbookService:
     
     Public API:
     - validate_runbook: Validate a runbook
-    - execute_runbook: Execute a runbook
+    - execute_runbook_streaming: Execute a runbook (streams stdout/stderr as SSE)
     - list_runbooks: List all available runbooks
     - get_runbook: Get runbook content
     - get_required_env: Get required environment variables
@@ -125,24 +125,22 @@ class RunbookService:
             logger.error(f"Error validating runbook {filename}: {str(e)}")
             raise HTTPInternalServerError(f"Failed to validate runbook: {str(e)}")
     
-    def execute_runbook(self, filename: str, token: Dict, breadcrumb: Dict, env_vars: Optional[Dict[str, str]] = None, token_string: Optional[str] = None) -> Dict:
+    def execute_runbook_streaming(
+        self,
+        filename: str,
+        token: Dict,
+        breadcrumb: Dict,
+        env_vars: Optional[Dict[str, str]] = None,
+        token_string: Optional[str] = None,
+    ) -> Generator[str, None, None]:
         """
-        Execute a runbook.
+        Execute a runbook and stream stdout/stderr as Server-Sent Events.
         
-        Args:
-            filename: The runbook filename
-            token: Token dictionary with user_id and claims
-            breadcrumb: Breadcrumb dictionary for logging
-            env_vars: Optional dictionary of environment variables to set
-            token_string: Optional JWT token string for passing to scripts
-            
-        Returns:
-            dict: Execution result with success, return_code, stdout, stderr, etc.
-            
-        Raises:
-            HTTPNotFound: If runbook is not found
-            HTTPForbidden: If RBAC check fails
+        Yields SSE-formatted strings: "event: X\ndata: Y\n\n"
+        Event types: stdout, stderr, done
         """
+        import json as json_module
+        
         runbook_path = self._resolve_runbook_path(filename)
         
         if not runbook_path.exists():
@@ -151,139 +149,136 @@ class RunbookService:
         start_time = datetime.now(timezone.utc)
         config = Config.get_instance()
         
+        def sse(event: str, data: str) -> str:
+            # SSE format: each line of data prefixed with "data: ", then blank line
+            lines = data.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            data_part = "\n".join(f"data: {line}" for line in lines)
+            return f"event: {event}\n{data_part}\n\n"
+        
         try:
-            # Extract recursion_stack from breadcrumb
-            recursion_stack = breadcrumb.get('recursion_stack')
-            # If None, treat as top-level execution (empty list for building new stack)
-            if recursion_stack is None:
-                recursion_stack = []
-            
-            # Initialize variables for history tracking
+            recursion_stack = breadcrumb.get('recursion_stack') or []
             validation_errors = []
             validation_warnings = []
             load_errors = []
             load_warnings = []
             validation_success = True
             
-            # Recursion validation: Check if this runbook is already in the execution chain
             if filename in recursion_stack:
                 error_msg = f"Recursion detected: Runbook {filename} already in execution chain: {recursion_stack}"
                 logger.warning(f"Recursion attempt blocked: {error_msg}")
-                return_code, stdout, stderr = 1, "", error_msg
-            elif len(recursion_stack) >= config.MAX_RECURSION_DEPTH:
-                # Recursion depth limit check
+                yield sse("stderr", error_msg)
+                yield sse("done", json_module.dumps({
+                    "success": False, "runbook": filename, "return_code": 1,
+                    "stdout": "", "stderr": error_msg, "errors": [error_msg], "warnings": []
+                }))
+                return
+            
+            if len(recursion_stack) >= config.MAX_RECURSION_DEPTH:
                 error_msg = f"Recursion depth limit exceeded: {len(recursion_stack)} (max: {config.MAX_RECURSION_DEPTH})"
-                logger.warning(f"Recursion depth limit exceeded: {error_msg}")
-                return_code, stdout, stderr = 1, "", error_msg
-            else:
-                # Load runbook
-                content, name, load_errors, load_warnings = RunbookParser.load_runbook(runbook_path)
-                if not content:
-                    raise HTTPInternalServerError("Failed to load runbook")
-                
-                # Extract required claims and check RBAC
-                required_claims = RBACAuthorizer.extract_required_claims(content)
-                RBACAuthorizer.check_rbac(token, required_claims, 'execute')
-                
-                # Validate runbook before execution (fail-fast)
-                validation_success, validation_errors, validation_warnings = RunbookValidator.validate_runbook_content(runbook_path, content, env_vars)
-                if not validation_success:
-                    # Return validation errors as execution failure
-                    error_msg = "\n".join(validation_errors)
-                    return_code, stdout, stderr = 1, "", error_msg
-                else:
-                    # Extract script and execute
-                    script = RunbookParser.extract_script(content)
-                    if not script:
-                        raise HTTPInternalServerError("Could not extract script from runbook")
-                    
-                    # Extract input paths from File System Requirements
-                    fs_section = RunbookParser.extract_section(content, 'File System Requirements')
-                    if fs_section:
-                        requirements = RunbookParser.extract_file_requirements(fs_section)
-                        input_paths = requirements.get('Input', [])
-                    else:
-                        input_paths = []
-                    
-                    # Build recursion stack for script (includes current runbook)
-                    new_recursion_stack = recursion_stack + [filename]
-                    # Update breadcrumb with new stack (for history/logging)
-                    breadcrumb['recursion_stack'] = new_recursion_stack
-                    
-                    # Extract correlation_id from breadcrumb
-                    correlation_id = breadcrumb.get('correlation_id')
-                    
-                    # Execute the script with system environment variables
-                    return_code, stdout, stderr = ScriptExecutor.execute_script(
-                        script, 
-                        env_vars,
-                        token_string=token_string,
-                        correlation_id=correlation_id,
-                        recursion_stack=new_recursion_stack,
-                        input_paths=input_paths,
-                        runbook_dir=runbook_path.parent
-                    )
+                logger.warning(error_msg)
+                yield sse("stderr", error_msg)
+                yield sse("done", json_module.dumps({
+                    "success": False, "runbook": filename, "return_code": 1,
+                    "stdout": "", "stderr": error_msg, "errors": [error_msg], "warnings": []
+                }))
+                return
             
-            finish_time = datetime.now(timezone.utc)
+            content, name, load_errors, load_warnings = RunbookParser.load_runbook(runbook_path)
+            if not content:
+                raise HTTPInternalServerError("Failed to load runbook")
             
-            # Collect errors/warnings for history
-            errors = validation_errors if not validation_success else []
-            warnings = validation_warnings
-            errors.extend(load_errors)
-            warnings.extend(load_warnings)
+            required_claims = RBACAuthorizer.extract_required_claims(content)
+            RBACAuthorizer.check_rbac(token, required_claims, 'execute')
             
-            # Append history
-            HistoryManager.append_history(
-                runbook_path,
-                start_time,
-                finish_time,
-                return_code,
-                'execute',
-                stdout,
-                stderr,
-                token,
-                breadcrumb,
-                config.config_items,
-                errors,
-                warnings
+            validation_success, validation_errors, validation_warnings = RunbookValidator.validate_runbook_content(
+                runbook_path, content, env_vars
             )
+            if not validation_success:
+                error_msg = "\n".join(validation_errors)
+                yield sse("stderr", error_msg)
+                yield sse("done", json_module.dumps({
+                    "success": False, "runbook": filename, "return_code": 1,
+                    "stdout": "", "stderr": error_msg, "errors": validation_errors,
+                    "warnings": validation_warnings
+                }))
+                return
             
-            # Reload content to parse last history entry for response
-            with open(runbook_path, 'r', encoding='utf-8') as f:
-                updated_content = f.read()
+            script = RunbookParser.extract_script(content)
+            if not script:
+                raise HTTPInternalServerError("Could not extract script from runbook")
             
-            # Parse last history entry for stdout/stderr
-            parsed_stdout, parsed_stderr = RunbookParser.parse_last_history_entry(updated_content)
+            fs_section = RunbookParser.extract_section(content, 'File System Requirements')
+            input_paths = RunbookParser.extract_file_requirements(fs_section).get('Input', []) if fs_section else []
+            new_recursion_stack = recursion_stack + [filename]
+            breadcrumb['recursion_stack'] = new_recursion_stack
+            correlation_id = breadcrumb.get('correlation_id')
             
-            return {
-                "success": return_code == 0,
-                "runbook": filename,
-                "return_code": return_code,
-                "stdout": parsed_stdout or stdout,
-                "stderr": parsed_stderr or stderr,
-                "errors": errors,
-                "warnings": warnings
-            }
+            for event_type, payload in ScriptExecutor.execute_script_streaming(
+                script,
+                env_vars,
+                token_string=token_string,
+                correlation_id=correlation_id,
+                recursion_stack=new_recursion_stack,
+                input_paths=input_paths,
+                runbook_dir=runbook_path.parent,
+            ):
+                if event_type == "done":
+                    done_data = json_module.loads(payload)
+                    return_code = done_data["return_code"]
+                    stdout = done_data["stdout"]
+                    stderr = done_data["stderr"]
+                    finish_time = datetime.now(timezone.utc)
+                    errors = validation_errors
+                    errors.extend(load_errors)
+                    warnings = validation_warnings
+                    warnings.extend(load_warnings)
+                    
+                    HistoryManager.append_history(
+                        runbook_path,
+                        start_time,
+                        finish_time,
+                        return_code,
+                        'execute',
+                        stdout,
+                        stderr,
+                        token,
+                        breadcrumb,
+                        config.config_items,
+                        errors,
+                        warnings,
+                    )
+                    
+                    result = {
+                        "success": return_code == 0,
+                        "runbook": filename,
+                        "return_code": return_code,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "errors": errors,
+                        "warnings": warnings,
+                    }
+                    yield sse("done", json_module.dumps(result))
+                    return
+                else:
+                    yield sse(event_type, payload)
             
         except HTTPForbidden as e:
             finish_time = datetime.now(timezone.utc)
-            # Log RBAC failure to runbook history
             try:
                 HistoryManager.append_rbac_failure_history(
-                    runbook_path, 
-                    str(e), 
-                    token.get('user_id', 'unknown'), 
+                    runbook_path,
+                    str(e),
+                    token.get('user_id', 'unknown'),
                     'execute',
                     token,
                     breadcrumb,
-                    config.config_items
+                    config.config_items,
                 )
             except Exception as log_error:
                 logger.error(f"Failed to log RBAC failure to history: {log_error}")
             raise
         
         except Exception as e:
-            finish_time = datetime.now(timezone.utc)
             logger.error(f"Error executing runbook {filename}: {str(e)}")
             raise HTTPInternalServerError(f"Failed to execute runbook: {str(e)}")
     

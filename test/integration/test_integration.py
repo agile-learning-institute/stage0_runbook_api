@@ -190,8 +190,21 @@ def test_validate_runbook_endpoint(client, dev_token):
             del os.environ['TEST_VAR']
 
 
+def _parse_sse_done(response_data: bytes) -> dict:
+    """Parse SSE response and return the last 'done' event's data as dict."""
+    text = response_data.decode('utf-8')
+    events = [e.strip() for e in text.strip().split('\n\n') if e.strip()]
+    for event in reversed(events):
+        if event.startswith('event: done'):
+            lines = event.split('\n')
+            data_lines = [ln[6:] for ln in lines if ln.startswith('data: ')]
+            if data_lines:
+                return json.loads('\n'.join(data_lines))
+    return {}
+
+
 def test_execute_runbook_endpoint(client, dev_token):
-    """Test POST /api/runbooks/<filename>/execute endpoint."""
+    """Test POST /api/runbooks/<filename>/execute endpoint (streaming SSE)."""
     os.environ['TEST_VAR'] = 'test_value'
     
     try:
@@ -202,8 +215,9 @@ def test_execute_runbook_endpoint(client, dev_token):
             content_type='application/json'
         )
         
-        assert response.status_code in [200, 500]  # 200 if success, 500 if script fails
-        data = json.loads(response.data)
+        assert response.status_code == 200
+        assert 'text/event-stream' in (response.content_type or '')
+        data = _parse_sse_done(response.data)
         assert 'success' in data
         assert 'runbook' in data
         assert 'return_code' in data
@@ -223,8 +237,8 @@ def test_execute_runbook_with_env_vars(client, dev_token):
         content_type='application/json'
     )
     
-    assert response.status_code in [200, 500]
-    data = json.loads(response.data)
+    assert response.status_code == 200
+    data = _parse_sse_done(response.data)
     assert 'success' in data
 
 
@@ -473,9 +487,9 @@ def test_concurrent_execute_runbooks(client, dev_token):
         assert len(errors) == 0, f"Concurrent executions failed with errors: {errors}"
         assert len(results) == 5, f"Expected 5 results, got {len(results)}"
         
-        # All should return valid status codes (200 or 500)
+        # Streaming always returns 200 (success/failure is in the done event)
         status_codes = [status for _, status in results]
-        assert all(status in [200, 500] for status in status_codes), \
+        assert all(status == 200 for status in status_codes), \
             f"Unexpected status codes: {status_codes}"
     finally:
         if 'TEST_VAR' in os.environ:
@@ -586,13 +600,11 @@ exit 1
             content_type='application/json'
         )
         
-        # Should return 500 (script failed) or 200 with success=False
-        assert response.status_code in [200, 500]
-        data = json.loads(response.data)
-        # Even if status 200, success should be False
-        if response.status_code == 200:
-            assert 'success' in data
-            assert data['success'] is False
+        # Streaming always returns 200; script failure is in the done event
+        assert response.status_code == 200
+        data = _parse_sse_done(response.data)
+        assert 'success' in data
+        assert data['success'] is False
     finally:
         if runbook_path.exists():
             runbook_path.unlink()

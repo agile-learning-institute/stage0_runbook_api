@@ -208,11 +208,16 @@ paths:
         Execute a runbook script. The runbook file is identified by the path parameter.
         Environment variables required by the runbook should be passed in the request body as JSON.
         
+        Returns a Server-Sent Events (SSE) stream with events:
+        - stdout: Standard output from the script (streamed as produced)
+        - stderr: Standard error from the script (streamed as produced)
+        - done: Final execution result (JSON with success, return_code, stdout, stderr, errors, warnings)
+        
         Execution will:
         1. Validate the runbook
-        2. Execute the script
+        2. Execute the script (streaming stdout/stderr)
         3. Append execution history to the runbook file
-        4. Return execution results including stdout, stderr, and a viewer link
+        4. Send the final done event with full results
       operationId: executeRunbook
       security:
         - bearerAuth: []
@@ -236,11 +241,12 @@ paths:
                 ANOTHER_VAR: another_value
       responses:
         '200':
-          description: Runbook executed successfully
+          description: Runbook execution stream (Server-Sent Events)
           content:
-            application/json:
+            text/event-stream:
               schema:
-                $ref: '#/components/schemas/ExecuteResponse'
+                type: string
+                description: SSE stream with events stdout, stderr, done
         '401':
           description: Unauthorized - missing or invalid authentication token
           content:
@@ -284,6 +290,10 @@ paths:
         
         This endpoint is useful for determining which environment variables need to be
         provided when executing a runbook.
+        
+        Environment variables are defined in the runbook's Environment Requirements section
+        as YAML (VAR_NAME: description). Descriptions should avoid unquoted special characters
+        like `:` since YAML may interpret them; use quotes when needed.
       operationId: getRequiredEnv
       security:
         - bearerAuth: []
@@ -595,7 +605,11 @@ components:
           example: TEST_VAR
         description:
           type: string
-          description: Description of what the variable should contain
+          description: |
+            Description of what the variable should contain. Extracted from the runbook's
+            Environment Requirements YAML. Runbook authors should avoid unquoted special
+            characters (e.g. `:`) in descriptions; use quotes when the description
+            contains YAML-special characters.
           example: A test environment variable
 
     ErrorResponse:

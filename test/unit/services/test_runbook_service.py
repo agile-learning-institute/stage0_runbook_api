@@ -2,6 +2,7 @@
 """
 Tests for the runbook service (merged RunbookRunner functionality).
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -480,7 +481,7 @@ def test_execute_runbook_not_found():
     breadcrumb = {'at_time': '2026-01-01T00:00:00Z', 'correlation_id': 'test-123'}
     
     with pytest.raises(HTTPNotFound):
-        service.execute_runbook('NonExistentRunbook.md', token, breadcrumb)
+        list(service.execute_runbook_streaming('NonExistentRunbook.md', token, breadcrumb))
 
 
 def test_get_runbook_not_found():
@@ -538,7 +539,7 @@ echo "test"
         breadcrumb = {'at_time': '2026-01-01T00:00:00Z', 'correlation_id': 'test-123'}
         
         with pytest.raises(HTTPForbidden):
-            service.execute_runbook('test_rbac_runbook.md', token, breadcrumb)
+            list(service.execute_runbook_streaming('test_rbac_runbook.md', token, breadcrumb))
     finally:
         if runbook_path.exists():
             runbook_path.unlink()
@@ -1245,7 +1246,7 @@ def test_execute_runbook_failed_load():
     # Mock load_runbook to return None content (file exists but load fails)
     with patch.object(RunbookParser, 'load_runbook', return_value=(None, None, ['Load error'], [])):
         with pytest.raises(HTTPInternalServerError, match="Failed to load runbook"):
-            service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+            list(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
 
 
 def test_execute_runbook_validation_failure():
@@ -1259,10 +1260,13 @@ def test_execute_runbook_validation_failure():
     runbook_path = Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks' / 'SimpleRunbook.md'
     content, name, errors, warnings = RunbookParser.load_runbook(runbook_path)
     
-    # Mock validation to fail
+    # Mock validation to fail - streaming yields stderr then done event
     with patch.object(RunbookValidator, 'validate_runbook_content', return_value=(False, ['Validation error'], [])):
-        result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
-        
+        chunks = list(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
+        # Last chunk is the done event
+        done_chunk = [c for c in chunks if 'event: done' in c][-1]
+        data_lines = [ln[6:] for ln in done_chunk.split('\n') if ln.startswith('data: ')]
+        result = json.loads('\n'.join(data_lines))
         assert result['success'] is False
         assert result['return_code'] == 1
         assert 'Validation error' in result['stderr']
@@ -1283,7 +1287,7 @@ def test_execute_runbook_no_script():
     with patch.object(RunbookParser, 'extract_script', return_value=None):
         with patch.object(RunbookValidator, 'validate_runbook_content', return_value=(True, [], [])):
             with pytest.raises(HTTPInternalServerError, match="Could not extract script"):
-                service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+                list(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
 
 
 def test_execute_runbook_rbac_failure_history_logging_error():
@@ -1300,7 +1304,7 @@ def test_execute_runbook_rbac_failure_history_logging_error():
     # Mock history logging to raise exception
     with patch('src.services.history_manager.HistoryManager.append_rbac_failure_history', side_effect=Exception("History error")):
         with pytest.raises(HTTPForbidden):
-            service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+            list(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
 
 
 def test_execute_runbook_general_exception():
@@ -1314,7 +1318,7 @@ def test_execute_runbook_general_exception():
     # Mock load_runbook to raise exception
     with patch.object(RunbookParser, 'load_runbook', side_effect=Exception("Unexpected error")):
         with pytest.raises(HTTPInternalServerError, match="Failed to execute runbook"):
-            service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+            list(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
 
 
 def test_get_runbook_exception():
@@ -1446,8 +1450,19 @@ def test_get_required_env_exception():
             service.get_required_env('SimpleRunbook.md', token, breadcrumb)
 
 
+def _parse_streaming_done(stream):
+    """Consume execute_runbook_streaming and return the final 'done' result as dict."""
+    chunks = list(stream)
+    done_chunks = [c for c in chunks if 'event: done' in c]
+    if not done_chunks:
+        return {}
+    done_chunk = done_chunks[-1]
+    data_lines = [ln[6:] for ln in done_chunk.split('\n') if ln.startswith('data: ')]
+    return json.loads('\n'.join(data_lines)) if data_lines else {}
+
+
 def test_execute_runbook_recursion_detection():
-    """Test execute_runbook detects recursion when runbook is already in execution chain."""
+    """Test execute_runbook_streaming detects recursion when runbook is already in execution chain."""
     runbooks_dir = str(Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks')
     service = RunbookService(runbooks_dir)
     
@@ -1458,7 +1473,7 @@ def test_execute_runbook_recursion_detection():
         'recursion_stack': ['ParentRunbook.md', 'SimpleRunbook.md']  # SimpleRunbook.md is already in stack
     }
     
-    result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+    result = _parse_streaming_done(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
     
     assert result['success'] is False, "Should fail due to recursion"
     assert result['return_code'] == 1, "Should return error code"
@@ -1467,7 +1482,7 @@ def test_execute_runbook_recursion_detection():
 
 
 def test_execute_runbook_recursion_depth_limit():
-    """Test execute_runbook enforces recursion depth limit."""
+    """Test execute_runbook_streaming enforces recursion depth limit."""
     runbooks_dir = str(Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks')
     service = RunbookService(runbooks_dir)
     config = Config.get_instance()
@@ -1482,7 +1497,7 @@ def test_execute_runbook_recursion_depth_limit():
         'recursion_stack': recursion_stack
     }
     
-    result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb)
+    result = _parse_streaming_done(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb))
     
     assert result['success'] is False, "Should fail due to recursion depth limit"
     assert result['return_code'] == 1, "Should return error code"
@@ -1490,7 +1505,7 @@ def test_execute_runbook_recursion_depth_limit():
 
 
 def test_execute_runbook_recursion_stack_building():
-    """Test execute_runbook builds recursion stack correctly for script execution."""
+    """Test execute_runbook_streaming builds recursion stack correctly for script execution."""
     runbooks_dir = str(Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks')
     service = RunbookService(runbooks_dir)
     
@@ -1502,29 +1517,24 @@ def test_execute_runbook_recursion_stack_building():
     }
     env_vars = {'TEST_VAR': 'test_value'}  # Provide required env var
     
-    # Mock ScriptExecutor to capture the recursion_stack passed to it
     captured_recursion_stack = []
-    original_execute = ScriptExecutor.execute_script
     
-    def mock_execute(script, env_vars=None, token_string=None, correlation_id=None, recursion_stack=None, input_paths=None, runbook_dir=None):
-        captured_recursion_stack.append(recursion_stack)
-        return 0, "success", ""
+    def mock_streaming(*args, **kwargs):
+        captured_recursion_stack.append(kwargs.get('recursion_stack'))
+        yield ("done", json.dumps({"return_code": 0, "stdout": "success", "stderr": ""}))
     
-    with patch.object(ScriptExecutor, 'execute_script', side_effect=mock_execute):
-        result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb, env_vars=env_vars)
+    with patch.object(ScriptExecutor, 'execute_script_streaming', side_effect=mock_streaming):
+        _parse_streaming_done(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb, env_vars=env_vars))
     
-    # Verify recursion stack includes current runbook
-    assert len(captured_recursion_stack) > 0, "Should call execute_script"
+    assert len(captured_recursion_stack) > 0, "Should call execute_script_streaming"
     assert captured_recursion_stack[0] == ['ParentRunbook.md', 'SimpleRunbook.md'], \
         "Recursion stack should include parent and current runbook"
-    
-    # Verify breadcrumb was updated
     assert breadcrumb['recursion_stack'] == ['ParentRunbook.md', 'SimpleRunbook.md'], \
         "Breadcrumb should be updated with new recursion stack"
 
 
 def test_execute_runbook_top_level_execution():
-    """Test execute_runbook handles top-level execution (no recursion stack)."""
+    """Test execute_runbook_streaming handles top-level execution (no recursion stack)."""
     runbooks_dir = str(Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks')
     service = RunbookService(runbooks_dir)
     
@@ -1536,24 +1546,22 @@ def test_execute_runbook_top_level_execution():
     }
     env_vars = {'TEST_VAR': 'test_value'}  # Provide required env var
     
-    # Mock ScriptExecutor to capture the recursion_stack passed to it
     captured_recursion_stack = []
     
-    def mock_execute(script, env_vars=None, token_string=None, correlation_id=None, recursion_stack=None, input_paths=None, runbook_dir=None):
-        captured_recursion_stack.append(recursion_stack)
-        return 0, "success", ""
+    def mock_streaming(*args, **kwargs):
+        captured_recursion_stack.append(kwargs.get('recursion_stack'))
+        yield ("done", json.dumps({"return_code": 0, "stdout": "success", "stderr": ""}))
     
-    with patch.object(ScriptExecutor, 'execute_script', side_effect=mock_execute):
-        result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb, env_vars=env_vars)
+    with patch.object(ScriptExecutor, 'execute_script_streaming', side_effect=mock_streaming):
+        _parse_streaming_done(service.execute_runbook_streaming('SimpleRunbook.md', token, breadcrumb, env_vars=env_vars))
     
-    # Verify recursion stack includes only current runbook for top-level execution
-    assert len(captured_recursion_stack) > 0, "Should call execute_script"
+    assert len(captured_recursion_stack) > 0, "Should call execute_script_streaming"
     assert captured_recursion_stack[0] == ['SimpleRunbook.md'], \
         "Top-level execution should have stack with only current runbook"
 
 
 def test_execute_runbook_passes_token_and_correlation():
-    """Test execute_runbook passes token_string and correlation_id to ScriptExecutor."""
+    """Test execute_runbook_streaming passes token_string and correlation_id to ScriptExecutor."""
     runbooks_dir = str(Path(__file__).parent.parent.parent.parent / 'samples' / 'runbooks')
     service = RunbookService(runbooks_dir)
     
@@ -1566,19 +1574,19 @@ def test_execute_runbook_passes_token_and_correlation():
     token_string = "test-token-123"
     env_vars = {'TEST_VAR': 'test_value'}  # Provide required env var
     
-    # Mock ScriptExecutor to capture parameters
     captured_params = {}
     
-    def mock_execute(script, env_vars=None, token_string=None, correlation_id=None, recursion_stack=None, input_paths=None, runbook_dir=None):
-        captured_params['token_string'] = token_string
-        captured_params['correlation_id'] = correlation_id
-        captured_params['recursion_stack'] = recursion_stack
-        return 0, "success", ""
+    def mock_streaming(*args, **kwargs):
+        captured_params['token_string'] = kwargs.get('token_string')
+        captured_params['correlation_id'] = kwargs.get('correlation_id')
+        captured_params['recursion_stack'] = kwargs.get('recursion_stack')
+        yield ("done", json.dumps({"return_code": 0, "stdout": "success", "stderr": ""}))
     
-    with patch.object(ScriptExecutor, 'execute_script', side_effect=mock_execute):
-        result = service.execute_runbook('SimpleRunbook.md', token, breadcrumb, env_vars=env_vars, token_string=token_string)
+    with patch.object(ScriptExecutor, 'execute_script_streaming', side_effect=mock_streaming):
+        _parse_streaming_done(service.execute_runbook_streaming(
+            'SimpleRunbook.md', token, breadcrumb, env_vars=env_vars, token_string=token_string
+        ))
     
-    # Verify parameters were passed correctly
     assert 'token_string' in captured_params, "Should capture token_string"
     assert captured_params['token_string'] == token_string, "Token string should be passed"
     assert captured_params['correlation_id'] == 'test-correlation-456', "Correlation ID should be passed"

@@ -2,17 +2,19 @@
 Script executor for running runbook scripts with resource limits and isolation.
 
 Handles script execution with timeouts, output size limits, and environment variable management.
+Supports streaming execution for real-time stdout/stderr delivery.
 """
 import os
 import re
 import json
 import subprocess
+import threading
 import time
 import uuid
 import tempfile
 import shutil
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Generator
 import logging
 
 from ..flask_utils.exceptions import HTTPInternalServerError
@@ -340,6 +342,266 @@ class ScriptExecutor:
                         display_value = original_value[:50] if len(str(original_value)) > 50 else original_value
                         logger.debug(f"Restored environment: {key} = {display_value}")
                     os.environ[key] = original_value
+    
+    @staticmethod
+    def execute_script_streaming(
+        script: str,
+        env_vars: Optional[Dict[str, str]] = None,
+        token_string: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        recursion_stack: Optional[List[str]] = None,
+        input_paths: Optional[List[str]] = None,
+        runbook_dir: Optional[Path] = None,
+    ) -> Generator[Tuple[str, str], None, None]:
+        """
+        Execute a script and stream stdout/stderr as they are produced.
+        
+        Yields:
+            ("stdout", chunk) or ("stderr", chunk) for each output chunk.
+            Final yield is ("done", json_str) with return_code, stdout, stderr for history.
+        """
+        import queue as queue_module
+        
+        config = Config.get_instance()
+        timeout_seconds = config.SCRIPT_TIMEOUT_SECONDS
+        max_output_bytes = config.MAX_OUTPUT_SIZE_BYTES
+        
+        if timeout_seconds <= 0:
+            timeout_seconds = config.get_default("SCRIPT_TIMEOUT_SECONDS")
+        if max_output_bytes <= 0:
+            max_output_bytes = config.get_default("MAX_OUTPUT_SIZE_BYTES")
+        
+        SYSTEM_ENV_VARS = {
+            'RUNBOOK_API_TOKEN', 'RUNBOOK_CORRELATION_ID', 'RUNBOOK_URL',
+            'RUNBOOK_RECURSION_STACK', 'RUNBOOK_H_AUTH', 'RUNBOOK_H_CORR',
+            'RUNBOOK_H_RECUR', 'RUNBOOK_H_CTYPE', 'RUNBOOK_HEADERS', 'RUNBOOK_EXEC_DIR_HOST',
+        }
+        
+        original_env = {}
+        if env_vars:
+            for key, value in env_vars.items():
+                if key in SYSTEM_ENV_VARS:
+                    continue
+                if not ENV_VAR_NAME_PATTERN.match(key):
+                    yield ("stderr", f"ERROR: Invalid environment variable name: {key}\n")
+                    yield ("done", json.dumps({
+                        "return_code": 1, "stdout": "", "stderr": f"ERROR: Invalid environment variable name: {key}"
+                    }))
+                    return
+                value = "" if value is None else str(value)
+                sanitized = ''.join(c for c in value if ord(c) >= 32 or c in ['\n', '\t', '\r'])
+                original_env[key] = os.environ.get(key)
+                os.environ[key] = sanitized
+        
+        if token_string:
+            original_env['RUNBOOK_API_TOKEN'] = os.environ.get('RUNBOOK_API_TOKEN')
+            os.environ['RUNBOOK_API_TOKEN'] = token_string
+        if correlation_id:
+            original_env['RUNBOOK_CORRELATION_ID'] = os.environ.get('RUNBOOK_CORRELATION_ID')
+            os.environ['RUNBOOK_CORRELATION_ID'] = correlation_id
+        
+        runbook_url = f"{config.API_PROTOCOL}://{config.API_HOST}:{config.API_PORT}/api/runbooks"
+        original_env['RUNBOOK_URL'] = os.environ.get('RUNBOOK_URL')
+        os.environ['RUNBOOK_URL'] = runbook_url
+        
+        recursion_stack_json = json.dumps(recursion_stack) if recursion_stack else None
+        if recursion_stack_json:
+            original_env['RUNBOOK_RECURSION_STACK'] = os.environ.get('RUNBOOK_RECURSION_STACK')
+            os.environ['RUNBOOK_RECURSION_STACK'] = recursion_stack_json
+        
+        if token_string:
+            header_auth = f"Authorization: Bearer {token_string}"
+            original_env['RUNBOOK_H_AUTH'] = os.environ.get('RUNBOOK_H_AUTH')
+            os.environ['RUNBOOK_H_AUTH'] = header_auth
+        if correlation_id:
+            header_corr = f"X-Correlation-Id: {correlation_id}"
+            original_env['RUNBOOK_H_CORR'] = os.environ.get('RUNBOOK_H_CORR')
+            os.environ['RUNBOOK_H_CORR'] = header_corr
+        if recursion_stack_json:
+            header_recur = f"X-Recursion-Stack: {recursion_stack_json}"
+            original_env['RUNBOOK_H_RECUR'] = os.environ.get('RUNBOOK_H_RECUR')
+            os.environ['RUNBOOK_H_RECUR'] = header_recur
+        header_ctype = "Content-Type: application/json"
+        original_env['RUNBOOK_H_CTYPE'] = os.environ.get('RUNBOOK_H_CTYPE')
+        os.environ['RUNBOOK_H_CTYPE'] = header_ctype
+        
+        headers_list = [f'-H "{header_ctype}"']
+        if token_string:
+            headers_list.insert(0, f'-H "{header_auth}"')
+        if correlation_id:
+            headers_list.insert(0, f'-H "{header_corr}"')
+        if recursion_stack_json:
+            headers_list.insert(0, f'-H "{header_recur}"')
+        original_env['RUNBOOK_HEADERS'] = os.environ.get('RUNBOOK_HEADERS')
+        os.environ['RUNBOOK_HEADERS'] = ' '.join(headers_list)
+        
+        temp_exec_dir = None
+        proc = None
+        stdout_acc: List[str] = []
+        stderr_acc: List[str] = []
+        stdout_bytes_acc = 0
+        stderr_bytes_acc = 0
+        stdout_truncated = False
+        stderr_truncated = False
+        return_code = 1
+        
+        try:
+            parent_dir = Path(config.EXECUTION_DIR) if Path(config.EXECUTION_DIR).is_dir() else None
+            temp_exec_dir = Path(tempfile.mkdtemp(
+                prefix=f'runbook-exec-{uuid.uuid4().hex[:8]}-',
+                dir=str(parent_dir) if parent_dir else None
+            ))
+            temp_script = temp_exec_dir / 'temp.zsh'
+            
+            if not temp_exec_dir.exists() or not temp_exec_dir.is_dir():
+                raise HTTPInternalServerError("Failed to create temporary execution directory")
+            
+            if input_paths and runbook_dir:
+                copy_errors = ScriptExecutor._copy_input_files(input_paths, runbook_dir, temp_exec_dir)
+                if copy_errors:
+                    error_msg = "Failed to copy input files:\n" + "\n".join(copy_errors)
+                    yield ("stderr", error_msg)
+                    yield ("done", json.dumps({"return_code": 1, "stdout": "", "stderr": error_msg}))
+                    return
+            
+            exec_env = dict(os.environ)
+            exec_env['RUNBOOK_EXEC_DIR_HOST'] = (
+                f"{config.MOUNT_DIR.rstrip('/')}/{temp_exec_dir.name}"
+                if (parent_dir and config.MOUNT_DIR) else str(temp_exec_dir)
+            )
+            
+            with open(temp_script, 'w', encoding='utf-8') as f:
+                f.write(script)
+            os.chmod(temp_script, 0o700)
+            
+            chunk_queue: queue_module.Queue = queue_module.Queue()
+            start_time = time.time()
+            
+            def stdout_thread():
+                try:
+                    for line in iter(proc.stdout.readline, ''):
+                        chunk_queue.put(("stdout", line))
+                except Exception:
+                    pass
+                finally:
+                    if proc.stdout:
+                        proc.stdout.close()
+            
+            def stderr_thread():
+                try:
+                    for line in iter(proc.stderr.readline, ''):
+                        chunk_queue.put(("stderr", line))
+                except Exception:
+                    pass
+                finally:
+                    if proc.stderr:
+                        proc.stderr.close()
+            
+            proc = subprocess.Popen(
+                ['/bin/zsh', str(temp_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(temp_exec_dir),
+                env=exec_env,
+            )
+            
+            t_stdout = threading.Thread(target=stdout_thread)
+            t_stderr = threading.Thread(target=stderr_thread)
+            t_stdout.daemon = True
+            t_stderr.daemon = True
+            t_stdout.start()
+            t_stderr.start()
+            
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed > timeout_seconds:
+                    proc.kill()
+                    proc.wait()
+                    err_msg = (
+                        f"\nScript execution timed out after {timeout_seconds} seconds. "
+                        "The script was terminated.\n"
+                    )
+                    stderr_acc.append(err_msg)
+                    yield ("stderr", err_msg)
+                    break
+                
+                try:
+                    item = chunk_queue.get(timeout=0.1)
+                except queue_module.Empty:
+                    if proc.poll() is not None:
+                        t_stdout.join(timeout=1)
+                        t_stderr.join(timeout=1)
+                        while True:
+                            try:
+                                item = chunk_queue.get_nowait()
+                            except queue_module.Empty:
+                                break
+                            stream_type, chunk = item
+                            chunk_bytes = len(chunk.encode('utf-8'))
+                            if stream_type == "stdout":
+                                if stdout_bytes_acc + chunk_bytes <= max_output_bytes:
+                                    stdout_acc.append(chunk)
+                                    stdout_bytes_acc += chunk_bytes
+                                    yield ("stdout", chunk)
+                                else:
+                                    stdout_truncated = True
+                            else:
+                                if stderr_bytes_acc + chunk_bytes <= max_output_bytes:
+                                    stderr_acc.append(chunk)
+                                    stderr_bytes_acc += chunk_bytes
+                                    yield ("stderr", chunk)
+                                else:
+                                    stderr_truncated = True
+                        break
+                    continue
+                
+                stream_type, chunk = item
+                chunk_bytes = len(chunk.encode('utf-8'))
+                if stream_type == "stdout":
+                    if stdout_bytes_acc + chunk_bytes <= max_output_bytes:
+                        stdout_acc.append(chunk)
+                        stdout_bytes_acc += chunk_bytes
+                        yield ("stdout", chunk)
+                    else:
+                        stdout_truncated = True
+                else:
+                    if stderr_bytes_acc + chunk_bytes <= max_output_bytes:
+                        stderr_acc.append(chunk)
+                        stderr_bytes_acc += chunk_bytes
+                        yield ("stderr", chunk)
+                    else:
+                        stderr_truncated = True
+            
+            return_code = proc.returncode if proc.returncode is not None else 0
+            
+        except Exception as e:
+            err_msg = f"ERROR: Failed to execute script: {e}\n"
+            stderr_acc.append(err_msg)
+            yield ("stderr", err_msg)
+            return_code = 1
+        finally:
+            if temp_exec_dir and temp_exec_dir.exists():
+                try:
+                    shutil.rmtree(temp_exec_dir)
+                except Exception:
+                    pass
+            for key, original_value in original_env.items():
+                if original_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = original_value
+        
+        stdout_str = "".join(stdout_acc)
+        stderr_str = "".join(stderr_acc)
+        if stdout_truncated or stderr_truncated:
+            stderr_str += f"\n[WARNING: Output truncated due to size limit ({max_output_bytes} bytes)]\n"
+        
+        yield ("done", json.dumps({
+            "return_code": return_code,
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+        }))
     
     @staticmethod
     def _copy_input_files(

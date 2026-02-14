@@ -447,9 +447,9 @@ def test_e2e_concurrent_executions(api_base_url, check_server_running, dev_token
     assert len(errors) == 0, f"Concurrent executions failed: {errors}"
     assert len(results) == 5, f"Expected 5 results, got {len(results)}"
     
-    # All should return valid status codes
+    # Streaming always returns 200 (success/failure is in the done event)
     status_codes = [status for _, status in results]
-    assert all(status in [200, 500] for status in status_codes), \
+    assert all(status == 200 for status in status_codes), \
         f"Unexpected status codes: {status_codes}"
 
 
