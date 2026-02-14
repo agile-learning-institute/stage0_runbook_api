@@ -31,37 +31,3 @@ echo "SimpleRunbook completed successfully"
 ```
 
 # History
-
-### 2026-02-14T21:23:06.208Z | Exit Code: 0
-
-**Stdout:**
-```
-Running SimpleRunbook
-Test variable value: asdf
-Current directory: /execution/runbook-exec-fa8641d7-tkdkw60f
-Listing files:
-total 4
-drwx------ 3 root root  96 Feb 14 21:23 .
-drwxr-xr-x 4 root root 128 Feb 14 21:23 ..
--rwx------ 1 root root 195 Feb 14 21:23 temp.zsh
-SimpleRunbook completed successfully
-
-```
-
-
-### 2026-02-14T21:25:55.433Z | Exit Code: 0
-
-**Stdout:**
-```
-Running SimpleRunbook
-Test variable value: asdf
-Current directory: /execution/runbook-exec-d08b72a6-7bfgvmlr
-Listing files:
-total 4
-drwx------ 3 root root  96 Feb 14 21:25 .
-drwxr-xr-x 3 root root  96 Feb 14 21:25 ..
--rwx------ 1 root root 195 Feb 14 21:25 temp.zsh
-SimpleRunbook completed successfully
-
-```
-

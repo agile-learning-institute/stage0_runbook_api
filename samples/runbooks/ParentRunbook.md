@@ -51,19 +51,3 @@ echo "Parent runbook completed successfully"
 ```
 
 # History
-
-### 2026-02-14T21:23:06.325Z | Exit Code: 0
-
-**Stdout:**
-```
-Parent runbook starting
-Correlation ID: 42ee524a-b60a-4363-accb-ac339370d97f
-Recursion stack: ["ParentRunbook.md"]
-Runbook URL: http://localhost:8083/api/runbooks
-Calling SimpleRunbook.md as sub-runbook...
-Child runbook executed successfully
-Response: {"success": true, "runbook": "SimpleRunbook.md", "return_code": 0, "stdout": "Running SimpleRunbook
-Parent runbook completed successfully
-
-```
-
